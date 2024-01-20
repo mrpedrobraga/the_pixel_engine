@@ -1,29 +1,18 @@
-#![allow(unused)]
 use engine::LuaEngine;
 use gameloop::game_loop;
 use mlua::prelude::*;
 use render::RenderState;
-use std::{
-    cell::RefCell,
-    fs,
-    sync::{mpsc, Arc, Mutex, RwLock},
-    thread::sleep,
-    time::{Duration, Instant},
-};
+use std::{fs, sync::mpsc};
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::{self, WindowBuilder},
+    window::WindowBuilder,
 };
 
 pub mod engine;
 pub mod gameloop;
 pub mod render;
-
-use std::io;
-use std::thread::{self, JoinHandle};
-use std::time;
 
 #[tokio::main]
 async fn main() -> LuaResult<()> {
@@ -46,36 +35,65 @@ enum LuaEngineMessage {
     Update(f64),
 }
 
+enum RenderMessage {
+    Clear((f64, f64, f64, f64)),
+    Resize(PhysicalSize<u32>),
+}
+
 fn start(event_loop: EventLoop<()>, mut render_state: RenderState) -> LuaResult<()> {
-    let (message_sender, message_receiver) = mpsc::channel::<LuaEngineMessage>();
+    let render_state_window_id = render_state.window.id();
+
+    let (lua_sender, lua_receiver) = mpsc::channel::<LuaEngineMessage>();
+    let (render_sender, render_receiver) = mpsc::channel::<RenderMessage>();
 
     let code = fs::read_to_string("./src/test.lua")?;
-    let mut render_state = Arc::new(Mutex::new(render_state));
 
-    let mut lua_render_state = Arc::clone(&render_state);
+    let lua_render_sender = render_sender.clone();
     tokio::spawn(async move {
         let mut engine = LuaEngine::new(code).unwrap();
 
-        engine.set_global("should_quit", false);
-        engine.provide_function("clear", make_clear_function(lua_render_state));
-        engine.init();
+        engine
+            .set_global("should_quit", false)
+            .expect("Error setting should_quit global!");
+        engine
+            .provide_function(
+                "clear",
+                mlua::Function::wrap(move |_, color: (f64, f64, f64, f64)| {
+                    lua_render_sender.send(RenderMessage::Clear(color)).unwrap();
+                    Ok(())
+                }),
+            )
+            .expect("Error defining clear function!");
+        engine.init().unwrap();
 
-        loop {
-            match message_receiver.recv().unwrap() {
-                LuaEngineMessage::Update(dt) => engine.update(dt),
+        while let Ok(message) = lua_receiver.recv() {
+            match message {
+                LuaEngineMessage::Update(dt) => {
+                    engine.update(dt).unwrap();
+                    engine.draw().unwrap();
+                }
             }
         }
     });
 
-    let update_message_sender = message_sender.clone();
+    let update_message_sender = lua_sender.clone();
     tokio::spawn(game_loop(60, move |dt| {
-        update_message_sender.send(LuaEngineMessage::Update(dt.as_secs_f64()));
+        update_message_sender
+            .send(LuaEngineMessage::Update(dt.as_secs_f64()))
+            .unwrap();
     }));
 
-    event_loop.run({
-        let render_state = Arc::clone(&render_state);
-        let render_state_window_id = render_state.lock().unwrap().window.id();
+    tokio::spawn(async move {
+        while let Ok(message) = render_receiver.recv() {
+            match message {
+                RenderMessage::Clear(color) => render_state.render(color).unwrap(),
+                _ => {}
+            }
+        }
+    });
 
+    let event_loop_sender = render_sender.clone();
+    event_loop.run({
         move |event, _, control_flow| match event {
             Event::WindowEvent {
                 ref event,
@@ -91,36 +109,16 @@ fn start(event_loop: EventLoop<()>, mut render_state: RenderState) -> LuaResult<
                     ..
                 } => {}
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                WindowEvent::Resized(new_physical_size) => render_state
-                    .lock()
-                    .expect("Lock error")
-                    .resize(*new_physical_size),
-                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => render_state
-                    .lock()
-                    .expect("Lock error")
-                    .resize(**new_inner_size),
+                WindowEvent::Resized(new_physical_size) => event_loop_sender
+                    .send(RenderMessage::Resize(*new_physical_size))
+                    .unwrap(),
+                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => event_loop_sender
+                    .send(RenderMessage::Resize(**new_inner_size))
+                    .unwrap(),
 
                 _ => {}
             },
             _ => {}
         }
     });
-
-    return Ok(());
-}
-
-fn handle_winit_events(event_loop: EventLoop<()>, render_state_ref: Arc<Mutex<RenderState>>) {}
-
-fn make_clear_function<'a>(render_state_ref: Arc<Mutex<RenderState>>) -> impl IntoLua<'a> {
-    mlua::Function::wrap(move |_, (color): (f64, f64, f64, f64)| {
-        let mut lock = render_state_ref.lock().unwrap();
-        match lock.render(color) {
-            Ok(_) => {}
-            Err(wgpu::SurfaceError::Lost) => lock.reconfigure_surface(),
-            //Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-            Err(e) => eprintln!("{:?}", e),
-        }
-        drop(lock);
-        Ok(())
-    })
 }

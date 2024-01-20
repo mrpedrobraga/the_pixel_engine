@@ -7,6 +7,7 @@ end
 
 -- Update the program, at 60FPS!
 function update(dt)
+    t = t + dt
     print("Updating from lua, dt is ", dt)
 end
 
