@@ -4,6 +4,8 @@
         "t",
         "update",
         "draw",
-        "clear"
+        "clear",
+        "btn",
+        "input"
     ]
 }

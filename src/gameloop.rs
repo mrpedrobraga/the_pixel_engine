@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-pub async fn game_loop<F>(fps: u64, update_fn: F) -> !
+pub async fn game_loop<F>(fps: u64, update_fn: F) -> ()
 where
     F: Fn(Duration) -> (),
 {

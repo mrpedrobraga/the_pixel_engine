@@ -1,8 +1,12 @@
 use engine::LuaEngine;
 use gameloop::game_loop;
-use mlua::prelude::*;
+
 use render::RenderState;
-use std::{fs, sync::mpsc};
+use std::{
+    fs,
+    future::Future,
+    sync::{mpsc, Arc, Mutex},
+};
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
@@ -15,24 +19,25 @@ pub mod gameloop;
 pub mod render;
 
 #[tokio::main]
-async fn main() -> LuaResult<()> {
+async fn main() {
     let e = EventLoop::new();
     let w = WindowBuilder::new()
         .with_title("Pixel Engine")
         .with_inner_size(PhysicalSize {
-            width: 64,
-            height: 64,
+            width: 360,
+            height: 360,
         })
         .with_resizable(false)
         .build(&e)
         .expect("Could not create window!");
     let s = RenderState::new(w).await;
 
-    start(e, s)
+    start(e, s);
 }
 
 enum LuaEngineMessage {
     Update(f64),
+    Input(&'static str, bool),
 }
 
 enum RenderMessage {
@@ -40,59 +45,41 @@ enum RenderMessage {
     Resize(PhysicalSize<u32>),
 }
 
-fn start(event_loop: EventLoop<()>, mut render_state: RenderState) -> LuaResult<()> {
+fn start(event_loop: EventLoop<()>, render_state: RenderState) {
     let render_state_window_id = render_state.window.id();
 
     let (lua_sender, lua_receiver) = mpsc::channel::<LuaEngineMessage>();
     let (render_sender, render_receiver) = mpsc::channel::<RenderMessage>();
 
-    let code = fs::read_to_string("./src/test.lua")?;
+    let code = fs::read_to_string("./src/test.lua").unwrap();
 
+    // LUA THREAD
     let lua_render_sender = render_sender.clone();
-    tokio::spawn(async move {
-        let mut engine = LuaEngine::new(code).unwrap();
+    tokio::spawn(lua_thread(code, lua_render_sender, lua_receiver));
 
-        engine
-            .set_global("should_quit", false)
-            .expect("Error setting should_quit global!");
-        engine
-            .provide_function(
-                "clear",
-                mlua::Function::wrap(move |_, color: (f64, f64, f64, f64)| {
-                    lua_render_sender.send(RenderMessage::Clear(color)).unwrap();
-                    Ok(())
-                }),
-            )
-            .expect("Error defining clear function!");
-        engine.init().unwrap();
-
-        while let Ok(message) = lua_receiver.recv() {
-            match message {
-                LuaEngineMessage::Update(dt) => {
-                    engine.update(dt).unwrap();
-                    engine.draw().unwrap();
-                }
-            }
-        }
-    });
-
+    // GAME LOOP
     let update_message_sender = lua_sender.clone();
-    tokio::spawn(game_loop(60, move |dt| {
-        update_message_sender
-            .send(LuaEngineMessage::Update(dt.as_secs_f64()))
-            .unwrap();
-    }));
+    tokio::spawn(game_loop_thread(update_message_sender));
 
-    tokio::spawn(async move {
-        while let Ok(message) = render_receiver.recv() {
-            match message {
-                RenderMessage::Clear(color) => render_state.render(color).unwrap(),
-                _ => {}
-            }
-        }
-    });
+    // RENDER THREAD
+    tokio::spawn(render_thread(render_receiver, render_state));
 
+    // EVENT LOOP, on the main thread.
     let event_loop_sender = render_sender.clone();
+    run_event_loop(
+        event_loop,
+        render_state_window_id,
+        lua_sender,
+        event_loop_sender,
+    );
+}
+
+fn run_event_loop(
+    event_loop: EventLoop<()>,
+    render_state_window_id: winit::window::WindowId,
+    lua_sender: mpsc::Sender<LuaEngineMessage>,
+    event_loop_sender: mpsc::Sender<RenderMessage>,
+) {
     event_loop.run({
         move |event, _, control_flow| match event {
             Event::WindowEvent {
@@ -102,12 +89,26 @@ fn start(event_loop: EventLoop<()>, mut render_state: RenderState) -> LuaResult<
                 WindowEvent::KeyboardInput {
                     input:
                         KeyboardInput {
-                            state: ElementState::Pressed,
-                            virtual_keycode: Some(VirtualKeyCode::Space),
+                            state,
+                            virtual_keycode: Some(vkeycode),
                             ..
                         },
                     ..
-                } => {}
+                } => {
+                    let key_is_pressed = if let ElementState::Pressed = state {
+                        true
+                    } else {
+                        false
+                    };
+
+                    match vkeycode {
+                        VirtualKeyCode::Left => {
+                            let _ =
+                                lua_sender.send(LuaEngineMessage::Input("left", key_is_pressed));
+                        }
+                        _ => {}
+                    };
+                }
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
                 WindowEvent::Resized(new_physical_size) => event_loop_sender
                     .send(RenderMessage::Resize(*new_physical_size))
@@ -121,4 +122,58 @@ fn start(event_loop: EventLoop<()>, mut render_state: RenderState) -> LuaResult<
             _ => {}
         }
     });
+}
+
+async fn render_thread(
+    render_receiver: mpsc::Receiver<RenderMessage>,
+    mut render_state: RenderState,
+) {
+    while let Ok(message) = render_receiver.recv() {
+        match message {
+            RenderMessage::Clear(color) => render_state.render(color).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+fn game_loop_thread(
+    update_message_sender: mpsc::Sender<LuaEngineMessage>,
+) -> impl Future<Output = ()> {
+    game_loop(60, move |dt| {
+        update_message_sender
+            .send(LuaEngineMessage::Update(dt.as_secs_f64()))
+            .unwrap();
+    })
+}
+
+async fn lua_thread(
+    code: String,
+    lua_render_sender: mpsc::Sender<RenderMessage>,
+    lua_receiver: mpsc::Receiver<LuaEngineMessage>,
+) {
+    let mut engine = LuaEngine::new(code).unwrap();
+    engine
+        .set_global("should_quit", false)
+        .expect("Error setting should_quit global!");
+    engine
+        .provide_function(
+            "clear",
+            mlua::Function::wrap(move |_, color: (f64, f64, f64, f64)| {
+                lua_render_sender.send(RenderMessage::Clear(color)).unwrap();
+                Ok(())
+            }),
+        )
+        .expect("Error defining clear function!");
+    engine.init().unwrap();
+    while let Ok(message) = lua_receiver.recv() {
+        match message {
+            LuaEngineMessage::Update(dt) => {
+                engine.update(dt).unwrap();
+                engine.draw().unwrap();
+            }
+            LuaEngineMessage::Input(kind, pressed) => {
+                engine.input(kind, pressed);
+            }
+        }
+    }
 }

@@ -3,6 +3,7 @@ use mlua::{IntoLua, Lua};
 const INIT_FUNCTION_NAME: &str = "init";
 const UPDATE_FUNCTION_NAME: &str = "update";
 const DRAW_FUNCTION_NAME: &str = "draw";
+const INPUT_FUNCTION_NAME: &str = "input";
 
 pub struct LuaEngine {
     lua: Lua,
@@ -49,6 +50,18 @@ impl LuaEngine {
             .get::<&str, mlua::Function>(DRAW_FUNCTION_NAME)
         {
             f.call::<_, ()>(())?
+        }
+
+        Ok(())
+    }
+
+    pub fn input(&mut self, kind: &'static str, pressed: bool) -> mlua::Result<()> {
+        if let Ok(f) = &mut self
+            .lua
+            .globals()
+            .get::<&str, mlua::Function>(INPUT_FUNCTION_NAME)
+        {
+            f.call::<_, ()>((kind, pressed))?
         }
 
         Ok(())

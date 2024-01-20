@@ -7,11 +7,14 @@ end
 
 -- Update the program, at 60FPS!
 function update(dt)
-    t = t + dt
-    print("Updating from lua, dt is ", dt)
+
+end
+
+function input(kind, pressed)
+    print(kind, pressed)
 end
 
 -- Draw sprites, tileset at 60FPS (lossy).
 function draw()
-    clear(math.abs(math.sin(t)), 0.0, 0.0, 0.0)
+    clear(0, 0.5 + 0.5 * math.sin(t * math.pi * 2.0), 0, 0);
 end
