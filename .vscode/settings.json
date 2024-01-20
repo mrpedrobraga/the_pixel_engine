@@ -1,0 +1,9 @@
+{
+    "Lua.diagnostics.globals": [
+        "init",
+        "t",
+        "update",
+        "draw",
+        "clear"
+    ]
+}
