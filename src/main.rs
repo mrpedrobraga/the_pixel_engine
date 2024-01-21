@@ -2,11 +2,7 @@ use engine::LuaEngine;
 use gameloop::game_loop;
 
 use render::RenderState;
-use std::{
-    fs,
-    future::Future,
-    sync::{mpsc, Arc, Mutex},
-};
+use std::{fs, future::Future, sync::mpsc};
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
@@ -27,6 +23,7 @@ async fn main() {
             width: 360,
             height: 360,
         })
+        .with_visible(false)
         .with_resizable(false)
         .build(&e)
         .expect("Could not create window!");
@@ -43,6 +40,7 @@ enum LuaEngineMessage {
 enum RenderMessage {
     Clear((f64, f64, f64, f64)),
     Resize(PhysicalSize<u32>),
+    ShowWindow,
 }
 
 fn start(event_loop: EventLoop<()>, render_state: RenderState) {
@@ -51,7 +49,7 @@ fn start(event_loop: EventLoop<()>, render_state: RenderState) {
     let (lua_sender, lua_receiver) = mpsc::channel::<LuaEngineMessage>();
     let (render_sender, render_receiver) = mpsc::channel::<RenderMessage>();
 
-    let code = fs::read_to_string("./src/test.lua").unwrap();
+    let code = fs::read_to_string("./main.lua").expect("No main.lua file found.");
 
     // LUA THREAD
     let lua_render_sender = render_sender.clone();
@@ -106,6 +104,24 @@ fn run_event_loop(
                             let _ =
                                 lua_sender.send(LuaEngineMessage::Input("left", key_is_pressed));
                         }
+                        VirtualKeyCode::Right => {
+                            let _ =
+                                lua_sender.send(LuaEngineMessage::Input("right", key_is_pressed));
+                        }
+                        VirtualKeyCode::Up => {
+                            let _ = lua_sender.send(LuaEngineMessage::Input("up", key_is_pressed));
+                        }
+                        VirtualKeyCode::Down => {
+                            let _ =
+                                lua_sender.send(LuaEngineMessage::Input("down", key_is_pressed));
+                        }
+                        VirtualKeyCode::Z => {
+                            let _ = lua_sender.send(LuaEngineMessage::Input("ok", key_is_pressed));
+                        }
+                        VirtualKeyCode::X => {
+                            let _ =
+                                lua_sender.send(LuaEngineMessage::Input("cancel", key_is_pressed));
+                        }
                         _ => {}
                     };
                 }
@@ -131,7 +147,8 @@ async fn render_thread(
     while let Ok(message) = render_receiver.recv() {
         match message {
             RenderMessage::Clear(color) => render_state.render(color).unwrap(),
-            _ => {}
+            RenderMessage::Resize(new_size) => render_state.resize(new_size),
+            RenderMessage::ShowWindow => render_state.window.set_visible(true),
         }
     }
 }
@@ -152,6 +169,10 @@ async fn lua_thread(
     lua_receiver: mpsc::Receiver<LuaEngineMessage>,
 ) {
     let mut engine = LuaEngine::new(code).unwrap();
+    if engine.has_draw_function() {
+        lua_render_sender.send(RenderMessage::ShowWindow).unwrap()
+    }
+
     engine
         .set_global("should_quit", false)
         .expect("Error setting should_quit global!");
@@ -172,7 +193,7 @@ async fn lua_thread(
                 engine.draw().unwrap();
             }
             LuaEngineMessage::Input(kind, pressed) => {
-                engine.input(kind, pressed);
+                let _ = engine.input(kind, pressed);
             }
         }
     }

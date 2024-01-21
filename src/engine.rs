@@ -1,3 +1,5 @@
+use std::error;
+
 use mlua::{IntoLua, Lua};
 
 const INIT_FUNCTION_NAME: &str = "init";
@@ -41,6 +43,18 @@ impl LuaEngine {
         }
 
         Ok(())
+    }
+
+    pub fn has_draw_function(&self) -> bool {
+        return match &self
+            .lua
+            .globals()
+            .get::<&str, mlua::Value>(DRAW_FUNCTION_NAME)
+            .unwrap()
+        {
+            mlua::Value::Nil => false,
+            _ => true,
+        };
     }
 
     pub fn draw(&mut self) -> mlua::Result<()> {

@@ -7,11 +7,14 @@ end
 
 -- Update the program, at 60FPS!
 function update(dt)
-
 end
 
 function input(kind, pressed)
-    print(kind, pressed)
+    if pressed then
+        if kind == "ok" then
+            print("pew!")
+        end
+    end
 end
 
 -- Draw sprites, tileset at 60FPS (lossy).
